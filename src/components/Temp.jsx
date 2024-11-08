@@ -3,11 +3,13 @@ import { useEffect, useRef, useState } from "react";
 const Temp = () => {
   const canvasRef = useRef(null);
   const videoRef = useRef(null);
-  const products = ['Leather', 'Tyre', 'Casting', 'Package'];
+  const products = ["Leather", "Tyre", "Casting", "Package"];
   const [defect, setDefect] = useState(false);
   const [pieces, setPieces] = useState(7);
-  const [setImageBlob] = useState(null);
-  const [badParts, setBadParts] = useState([]);
+  const [defectiveImageBase64, setDefectiveImageBase64] = useState(null);
+  const [defectiveImageBlob, setDefectiveImageBlob] = useState(null);
+  const [imageUrl, setImageUrl] = useState("");
+  const [isAnalyzing, setIsAnalyzing] = useState(false); // New state for analysis
 
   const handlePause = () => {
     if (videoRef.current) {
@@ -35,12 +37,12 @@ const Temp = () => {
   useEffect(() => {
     const interval = setInterval(() => {
       captureImageFromCamera();
-      setPieces(pieces + 1);
+      setPieces((prevPieces) => prevPieces + 1);
       console.log("Captured the image from the camera");
-    }, 5000);
+    }, 15000);
 
     return () => clearInterval(interval);
-  }, [pieces]);
+  }, [defectiveImageBlob]);
 
   const playCameraStream = () => {
     if (videoRef.current) {
@@ -59,29 +61,101 @@ const Temp = () => {
 
         context.drawImage(videoRef.current, 0, 0, videoWidth, videoHeight);
         canvasRef.current.toBlob((blob) => {
-          setImageBlob(blob);
-          setTimeout(() => sendImageToServer(blob), 10000); // Delay sending the image by 10 seconds
-        });
+          setDefectiveImageBlob(blob);
+          if (blob) {
+            sendImageToServer(blob); // Send the image right after capturing it
+          }
+        }, "image/jpeg");
       }
     }
   };
 
   const sendImageToServer = async (imageBlob) => {
-    try {
-      const formData = new FormData();
-      formData.append("image", imageBlob);
+    setIsAnalyzing(true); // Start analysis state
+    const maxRetries = 3;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const formData = new FormData();
+        formData.append("file", imageBlob);
+        setDefectiveImageBlob(imageBlob);
+        const response = await fetch("http://127.0.0.1:8000/predict", {
+          method: "POST",
+          body: formData,
+        });
 
-      const response = await fetch("http://localhost:8000/classify", {
-        method: "POST",
-        body: formData,
-      });
+        if (!response.ok) {
+          throw new Error("Error in response");
+        }
 
-      const data = await response.json();
-      if (data.success) {
-        setBadParts((prev) => [...prev, URL.createObjectURL(imageBlob)]);
+        const data = await response.json();
+        if (data.label) {
+          console.log(data);
+          console.log("Prediction:", data.label);
+
+          if (data.label === "GOOD") {
+            setDefect(false); // or any logic related to non-defective
+          } else {
+            setDefect(true);
+            setDefectiveImageBase64(data.bbox_image);
+          }
+        }
+        break; // Break out of the loop if successful
+      } catch (error) {
+        console.error(
+          `Error sending image to the server (attempt ${attempt + 1}):`,
+          error
+        );
+        if (attempt === maxRetries - 1) {
+          alert("Failed to send image after multiple attempts.");
+        }
       }
-    } catch (error) {
-      console.error("Error sending image to the server:", error);
+    }
+    setIsAnalyzing(false); // End analysis state
+  };
+
+  useEffect(() => {
+    if (defectiveImageBase64) {
+      const base64ToBlob = (base64, mimeType) => {
+        const byteCharacters = atob(base64);
+        const byteArrays = [];
+
+        for (let offset = 0; offset < byteCharacters.length; offset += 512) {
+          const slice = byteCharacters.slice(offset, offset + 512);
+          const byteNumbers = new Array(slice.length);
+
+          for (let i = 0; i < slice.length; i++) {
+            byteNumbers[i] = slice.charCodeAt(i);
+          }
+
+          const byteArray = new Uint8Array(byteNumbers);
+          byteArrays.push(byteArray);
+        }
+
+        return new Blob(byteArrays, { type: mimeType });
+      };
+
+      const displayImageFromBase64 = (base64Image) => {
+        const b = base64ToBlob(base64Image, "image/jpeg");
+        return URL.createObjectURL(b);
+      };
+
+      const url = displayImageFromBase64(defectiveImageBase64);
+      setImageUrl(url);
+      return () => URL.revokeObjectURL(url);
+    }
+  }, [defectiveImageBase64]);
+
+  // Function to handle image upload
+  const handleImageUpload = (event) => {
+    const file = event.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setImageUrl(reader.result);
+        const blob = new Blob([new Uint8Array(reader.result), { type: file.type }]);
+        sendImageToServer(blob); // Send the uploaded image to the server
+      };
+      reader.readAsArrayBuffer(file); // Read the file as an ArrayBuffer
     }
   };
 
@@ -97,7 +171,7 @@ const Temp = () => {
               <div className="text-sm">
                 <p className="font-semibold">{p}</p>
                 <p className="text-xs bg-green-500 rounded-md px-1 text-white">
-                  Status: Normal
+                  Selected
                 </p>
               </div>
               <i className="ml-4 text-2xl ri-arrow-right-s-line"></i>
@@ -132,7 +206,9 @@ const Temp = () => {
         </div>
         <div className="flex gap-6">
           <div
-            className={`mt-6 bg-white border-8 ${!defect ? 'border-green-500' : 'border-red-500'} rounded-lg shadow-xl p-4 w-[50%] h-[450px] relative`}
+            className={`mt-6 bg-white border-8 ${
+              !defect ? "border-green-500" : "border-red-500"
+            } rounded-lg shadow-xl p-4 w-[50%] h-[450px] relative`}
           >
             <video
               ref={videoRef}
@@ -143,22 +219,32 @@ const Temp = () => {
             />
             <canvas ref={canvasRef} style={{ display: "none" }}></canvas>
             <div className="flex absolute bottom-[-30px] left-[50%] transform -translate-x-[50%] gap-4">
-              <button className="bg-green-600 text-white py-2 px-4 rounded-lg shadow-sm transition-transform hover:scale-105">
-                Good
-              </button>
-              <button
-                className="bg-red-500 text-white py-2 px-4 rounded-lg shadow-sm transition-transform hover:scale-105"
-                onClick={() => setDefect(true)}
-              >
-                Defect
-              </button>
+              {!defect && (
+                <button className="bg-green-600 text-white py-2 px-4 rounded-lg shadow-sm transition-transform hover:scale-105">
+                  Good
+                </button>
+              )}
+              {defect && (
+                <button
+                  className="bg-red-500 text-white py-2 px-4 rounded-lg shadow-sm transition-transform hover:scale-105"
+                  onClick={() => setDefect(true)}
+                >
+                  Defect
+                </button>
+              )}
+              {isAnalyzing && (
+                <div className="flex items-center justify-center">
+                  <div className="animate-spin h-6 w-6 border-4 border-t-transparent border-blue-500 rounded-full"></div>
+                  <span className="ml-2 text-gray-600">Analyzing...</span>
+                </div>
+              )}
             </div>
           </div>
-
-          <div className="bg-white rounded-lg shadow-xl p-5 w-[50%] h-[450px] mt-[20px] flex flex-col justify-between">
-            <div>
+          <div className="w-[50%]">
+             {!defectiveImageBase64 && (<div className="mt-[22px]">
               <p className="text-xl flex items-center gap-2 font-mono text-gray-800">
-                <div className="h-4 w-4 rounded-full bg-green-400"></div> Everything working correctly
+                <div className="h-4 w-4 rounded-full bg-green-400"></div>{" "}
+                Everything working correctly
               </p>
               <div className="mt-6">
                 <div className="flex items-end">
@@ -173,25 +259,35 @@ const Temp = () => {
                 <hr className="w-[50%] mt-1"></hr>
                 <p className="text-gray-800 ml-2">Bad pieces (28)</p>
               </div>
-            </div>
-
-            <div>
-              <h2 className="text-lg font-semibold mb-4">Last Bad Parts</h2>
-              <div className="flex gap-4">
-                {badParts.map((part, index) => (
-                  <div key={index} className="w-16 h-16">
-                    <img
-                      src={part}
-                      alt={`bad part ${index + 1}`}
-                      className="w-full h-full object-cover border border-black rounded-md"
-                    />
-                  </div>
-                ))}
+            </div>)}
+            {defectiveImageBase64 && (
+              <div className="relative mt-10">
+                <img
+                  src={imageUrl}
+                  alt="Defective item"
+                  className="object-cover w-full h-full rounded-lg border border-gray-300 shadow-lg"
+                />
+                <div className="absolute bottom-2 right-2 bg-red-600 text-white text-xs py-1 px-2 rounded">
+                  Defective
+                </div>
               </div>
-              <button className="mt-4 bg-gray-100 border-2 border-black py-2 px-4 rounded-full">
-                Review All
-              </button>
-            </div>
+            )}
+            {!defectiveImageBase64 && (
+              <div className="mt-[25px]">
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handleImageUpload}
+                  className="mb-4 border border-gray-300 p-2 rounded"
+                />
+                <button
+                  onClick={captureImageFromCamera}
+                  className="bg-blue-600 text-white py-2 px-4 rounded"
+                >
+                  Capture Image
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -200,3 +296,4 @@ const Temp = () => {
 };
 
 export default Temp;
+
